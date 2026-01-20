@@ -27,14 +27,32 @@ echo.
 echo Detecting active network adapter...
 echo.
 
-REM Detect active network adapter
-for /f "tokens=*" %%a in ('powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty Name"') do set ADAPTER_NAME=%%a
+REM Create temp file for adapter detection
+set "TEMP_FILE=%TEMP%\adapter_temp.txt"
+powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Select-Object -First 1 -ExpandProperty Name" > "%TEMP_FILE%" 2>&1
+
+REM Read adapter name from temp file
+set "ADAPTER_NAME="
+for /f "usebackq delims=" %%a in ("%TEMP_FILE%") do (
+    if not defined ADAPTER_NAME set "ADAPTER_NAME=%%a"
+)
+
+REM Clean up temp file
+if exist "%TEMP_FILE%" del "%TEMP_FILE%"
 
 if "%ADAPTER_NAME%"=="" (
     echo [ERROR] No active network adapter found!
     echo.
-    echo Please make sure you are connected to a network
-    echo (Wi-Fi or Ethernet) and try again.
+    echo Troubleshooting:
+    echo - Make sure you are connected to Wi-Fi or Ethernet
+    echo - Check if your network adapter is enabled
+    echo - Try running this script as Administrator
+    echo.
+    echo Press any key to show all network adapters...
+    pause >nul
+    echo.
+    echo All Network Adapters:
+    powershell -Command "Get-NetAdapter | Format-Table Name, Status, InterfaceDescription -AutoSize"
     echo.
     pause
     exit /b 1
@@ -44,24 +62,32 @@ echo [DETECTED] Active Adapter: %ADAPTER_NAME%
 echo.
 
 REM Check if multiple adapters are active
-for /f %%a in ('powershell -Command "(Get-NetAdapter | Where-Object {$_.Status -eq 'Up'}).Count"') do set ADAPTER_COUNT=%%a
+set "ADAPTER_COUNT=0"
+for /f %%a in ('powershell -Command "(Get-NetAdapter | Where-Object {$_.Status -eq 'Up'}).Count"') do set "ADAPTER_COUNT=%%a"
 
 if %ADAPTER_COUNT% gtr 1 (
-    echo Note: Multiple active adapters detected.
+    echo Note: Multiple active adapters detected (%ADAPTER_COUNT% adapters)
     echo.
     powershell -Command "Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Format-Table Name, InterfaceDescription, Status -AutoSize"
     echo.
     echo [SELECTED] Using: %ADAPTER_NAME%
     echo.
-    echo If this is not the correct adapter, please:
-    echo 1. Disconnect other network adapters
-    echo 2. Run this script again
+    echo If this is not the correct adapter:
+    echo   1. Press N to exit
+    echo   2. Disconnect other network adapters
+    echo   3. Run this script again
     echo.
-    set /p continue="Continue with '%ADAPTER_NAME%'? (Y/N): "
-    if /i not "%continue%"=="Y" goto END
+    choice /C YN /M "Continue with '%ADAPTER_NAME%'"
+    if errorlevel 2 goto END
+    if errorlevel 1 goto CONTINUE_DETECTION
+) else (
+    echo This adapter will be used for AdGuard DNS configuration.
+    echo.
+    timeout /t 2 >nul
 )
 
-timeout /t 2 >nul
+:CONTINUE_DETECTION
+cls
 
 :MENU
 cls
@@ -76,9 +102,11 @@ echo Checking current DNS status...
 echo.
 
 REM Check if AdGuard DNS is currently active
-powershell -Command "$dns = Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ServerAddresses; if ($dns -contains '94.140.14.14') { exit 1 } else { exit 0 }"
+set "DNS_CHECK=0"
+powershell -Command "$dns = Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ServerAddresses; if ($dns -contains '94.140.14.14') { exit 1 } else { exit 0 }" >nul 2>&1
+if %errorlevel% equ 1 set "DNS_CHECK=1"
 
-if %errorlevel% equ 1 (
+if "%DNS_CHECK%"=="1" (
     echo [STATUS] AdGuard DNS is currently ENABLED
     echo.
     echo DNS Servers:
@@ -101,6 +129,8 @@ if %errorlevel% equ 1 (
     if "%choice%"=="2" goto ENABLE
     if "%choice%"=="3" goto DETECT_ADAPTER
     if "%choice%"=="4" goto END
+    echo Invalid choice. Please try again.
+    timeout /t 2 >nul
     goto MENU
 ) else (
     echo [STATUS] AdGuard DNS is currently DISABLED
@@ -120,6 +150,8 @@ if %errorlevel% equ 1 (
     if "%choice%"=="1" goto ENABLE
     if "%choice%"=="2" goto DETECT_ADAPTER
     if "%choice%"=="3" goto END
+    echo Invalid choice. Please try again.
+    timeout /t 2 >nul
     goto MENU
 )
 
@@ -141,7 +173,7 @@ echo    [OK] Encryption templates added
 echo.
 
 echo Step 2: Setting DNS servers on %ADAPTER_NAME%...
-powershell -Command "Set-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -ServerAddresses ('94.140.14.14','94.140.15.15','2a10:50c0::ad1:ff','2a10:50c0::ad2:ff')" >nul 2>&1
+powershell -Command "try { Set-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -ServerAddresses ('94.140.14.14','94.140.15.15','2a10:50c0::ad1:ff','2a10:50c0::ad2:ff') -ErrorAction Stop; exit 0 } catch { exit 1 }" >nul 2>&1
 if %errorlevel% equ 0 (
     echo    [OK] DNS servers configured successfully
 ) else (
@@ -154,7 +186,7 @@ if %errorlevel% equ 0 (
 echo.
 
 echo Step 3: Enabling DNS over HTTPS encryption...
-powershell -Command "$guid = (Get-NetAdapter -Name '%ADAPTER_NAME%').InterfaceGuid.ToLower(); New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\" -Name '94.140.14.14' -Force | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\94.140.14.14\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\" -Name '94.140.15.15' -Force | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\94.140.15.15\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\" -Name '2a10:50c0::ad1:ff' -Force | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\2a10:50c0::ad1:ff\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\" -Name '2a10:50c0::ad2:ff' -Force | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\2a10:50c0::ad2:ff\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force | Out-Null" >nul 2>&1
+powershell -Command "try { $guid = (Get-NetAdapter -Name '%ADAPTER_NAME%').InterfaceGuid.ToLower(); New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\" -Name '94.140.14.14' -Force -ErrorAction Stop | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\94.140.14.14\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force -ErrorAction Stop | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\" -Name '94.140.15.15' -Force -ErrorAction Stop | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh\94.140.15.15\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force -ErrorAction Stop | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\" -Name '2a10:50c0::ad1:ff' -Force -ErrorAction Stop | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\2a10:50c0::ad1:ff\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force -ErrorAction Stop | Out-Null; New-Item -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\" -Name '2a10:50c0::ad2:ff' -Force -ErrorAction Stop | Out-Null; New-ItemProperty -Path \"HKLM:\System\CurrentControlSet\Services\Dnscache\InterfaceSpecificParameters\$guid\DohInterfaceSettings\Doh6\2a10:50c0::ad2:ff\" -Name 'DohFlags' -Value 1 -PropertyType QWord -Force -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }" >nul 2>&1
 if %errorlevel% equ 0 (
     echo    [OK] DNS over HTTPS enabled
 ) else (
@@ -165,7 +197,7 @@ if %errorlevel% equ 0 (
 echo.
 
 echo Step 4: Verifying configuration...
-powershell -Command "$dns = Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -AddressFamily IPv4 | Select-Object -ExpandProperty ServerAddresses; if ($dns -contains '94.140.14.14') { exit 0 } else { exit 1 }" >nul 2>&1
+powershell -Command "$dns = Get-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty ServerAddresses; if ($dns -contains '94.140.14.14') { exit 0 } else { exit 1 }" >nul 2>&1
 if %errorlevel% equ 0 (
     echo    [OK] Configuration verified successfully
 ) else (
@@ -201,7 +233,7 @@ echo.
 echo Network Adapter: %ADAPTER_NAME%
 echo.
 echo Reverting to automatic DNS settings...
-powershell -Command "Set-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -ResetServerAddresses" >nul 2>&1
+powershell -Command "try { Set-DnsClientServerAddress -InterfaceAlias '%ADAPTER_NAME%' -ResetServerAddresses -ErrorAction Stop; exit 0 } catch { exit 1 }" >nul 2>&1
 if %errorlevel% equ 0 (
     echo    [OK] DNS settings reset to automatic
 ) else (
